@@ -54,35 +54,48 @@ python src/main.py --south <lat> --west <lon> --north <lat> --east <lon> [option
 - `--duration-hours`: Simulation duration in hours (default: 24.0)
 - `--time-step`: Simulation time step in seconds (default: 1.0)
 - `--start-time`: Start time in YYYY-MM-DD HH:MM format (default: current time)
+- `--max-pedestrians`: Maximum simultaneous pedestrians (default: 30)
+- `--ped-spawn-rate`: Pedestrians spawned per simulated second (default: 0.3)
 
-### Example
+### Example — busy Cambridge city centre
+
+The bounding box below covers the densest pedestrian area of Cambridge: Market Square, King's Parade, Grand Arcade, and the surrounding streets — roughly 1.1 km × 1.0 km.
 
 ```bash
-# Simulate 4 robots in a small area of Cambridge, UK for 10 minutes
-python src/main.py --south 52.20 --west 0.10 --north 52.21 --east 0.12 \
-                   --g1-count 2 --go1-count 2 --duration-hours 0.1667
+uv run src/main.py \
+  --south 52.2010 --west 0.1175 --north 52.2110 --east 0.1310 \
+  --g1-count 50 --go1-count 50 \
+  --max-pedestrians 300 --ped-spawn-rate 2.0 \
+  --duration-hours 1 \
+  --save-to-file
 ```
 
+What this simulates:
+- **100 Unitree robots** (50 G1 humanoids + 50 Go1 quadrupeds) patrolling the street network
+- **Up to 300 pedestrians** flowing in from the map edges at 2 per simulated second, walking along roads (70%) or wandering near buildings (30%)
+- Robots slow to 40 % speed within 5 m of a pedestrian and stop within 2 m
+- Each robot's sensor cone (G1: 120°/15 m LiDAR; Go1: 150°/10 m depth camera) counts detected humans and other robots per step
+- Battery drains realistically: G1 runs ~4 h, Go1 ~3.5 h at 1 m/s
+
+After the run, open the recording:
+
 ```bash
-# Simulate 4 robots in a small area of Cambridge, UK for 1 hour
-uv run src/main.py --south 52.20 --west 0.10 --north 52.21 --east 0.12 --g1-count 2 --go1-count 2 --duration-hours 1
+rerun --web-viewer rerun.rrd
 ```
 
 ## Visualization
 
-After running the simulator, view the results with Rerun:
+Always use `--save-to-file` and open with the web viewer (the native viewer requires GPU support that is not available on all platforms, e.g. WSL2):
 
 ```bash
-rerun rerun.dat
+rerun --web-viewer rerun.rrd
 ```
 
-This will open a web interface showing:
-- Robot positions as colored points (blue for G1, orange for Go1)
-- Robot size proportional to bounding box
-- Velocity represented by color intensity (brighter blue = faster)
-- Battery levels as scalar values
-- Road segments as gray lines
-- Collision events as warning logs
+The layout contains:
+- **Map view** — OpenStreetMap tiles with road network (grey), robots (blue = G1, orange = Go1), pedestrians (green), and each robot's sensor cone outline
+- **Battery Levels** — per-robot time series; lines drop as robots walk and flatline when batteries are depleted
+- **Humans Detected / Robots Detected** — per-robot count of agents inside the sensor cone at each step
+- **Logs** — collision warnings
 
 ## Output
 
