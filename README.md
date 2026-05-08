@@ -17,12 +17,12 @@ A simulator for fleets of Unitree robots (G1/Go1 models) patrolling within user-
 1. Clone this repository
 2. Create a virtual environment (optional but recommended):
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   python -m venv venv OR uv venv
+   source .venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 3. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   uv pip install -r requirements.txt
    ```
 
 ## Dependencies
@@ -61,6 +61,11 @@ python src/main.py --south <lat> --west <lon> --north <lat> --east <lon> [option
 # Simulate 4 robots in a small area of Cambridge, UK for 10 minutes
 python src/main.py --south 52.20 --west 0.10 --north 52.21 --east 0.12 \
                    --g1-count 2 --go1-count 2 --duration-hours 0.1667
+```
+
+```bash
+# Simulate 4 robots in a small area of Cambridge, UK for 1 hour
+uv run src/main.py --south 52.20 --west 0.10 --north 52.21 --east 0.12 --g1-count 2 --go1-count 2 --duration-hours 1
 ```
 
 ## Visualization

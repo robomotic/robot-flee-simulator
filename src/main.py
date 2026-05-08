@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 # Local imports
 from map import MapDataFetcher
 from robot import RobotManager
+from pedestrian import PedestrianManager
 from logger import RerunLogger
 from utils import BoundingBox, GeoPoint
 
@@ -48,7 +49,13 @@ def parse_arguments():
                         help='Start time in YYYY-MM-DD HH:MM format (default: now)')
     parser.add_argument('--save-to-file', action='store_true',
                         help='Save Rerun data to file (default: real-time streaming)')
-    
+
+    # Pedestrian arguments
+    parser.add_argument('--max-pedestrians', type=int, default=30,
+                        help='Maximum simultaneous pedestrians (default: 30)')
+    parser.add_argument('--ped-spawn-rate', type=float, default=0.3,
+                        help='Pedestrians spawned per simulated second (default: 0.3)')
+
     return parser.parse_args()
 
 def main():
@@ -58,6 +65,7 @@ def main():
     print("Starting Robo Fleet Simulator...")
     print(f"Bounding box: ({args.south}, {args.west}) to ({args.north}, {args.east})")
     print(f"Robots: {args.g1_count} G1, {args.go1_count} Go1")
+    print(f"Pedestrians: max {args.max_pedestrians}, spawn rate {args.ped_spawn_rate}/s")
     print(f"Duration: {args.duration_hours} hours")
     print(f"Time step: {args.time_step} seconds")
     
@@ -101,6 +109,15 @@ def main():
         walkable_ways=walkable_ways,
         bbox=(args.south, args.west, args.north, args.east)
     )
+
+    # 2b. Initialize pedestrian manager
+    print("Initializing pedestrian manager...")
+    pedestrian_manager = PedestrianManager(
+        walkable_ways=walkable_ways,
+        bbox=(args.south, args.west, args.north, args.east),
+        spawn_rate=args.ped_spawn_rate,
+        max_pedestrians=args.max_pedestrians,
+    )
     
     # 3. Initialize logger
     print("Initializing Rerun logger...")
@@ -126,16 +143,33 @@ def main():
             # Update simulation time
             current_time = start_time + timedelta(seconds=simulation_seconds)
             
-            # Update robot positions
-            robot_manager.update_positions(args.time_step)
-            
+            # Update pedestrians first so robots can react to their positions
+            pedestrian_manager.update(
+                args.time_step,
+                robot_local_positions=robot_manager.get_local_positions(),
+            )
+
+            # Update robot positions, passing pedestrian locations for avoidance
+            robot_manager.update_positions(
+                args.time_step,
+                pedestrian_local_positions=pedestrian_manager.get_local_positions(),
+            )
+
             # Detect collisions
             collisions = robot_manager.detect_collisions()
             if collisions:
                 logger.log_collisions(collisions, current_time)
-            
-            # Log robot states
+
+            # Cone detection: count humans and robots in each robot's FOV
+            detections = robot_manager.detect_in_cone(
+                pedestrian_local_positions=pedestrian_manager.get_local_positions(),
+            )
+
+            # Log states
             logger.log_robots(robot_manager.get_robots_state(), current_time)
+            logger.log_pedestrians(pedestrian_manager.get_state(), current_time)
+            logger.log_robot_cones(robot_manager.get_detection_cones(), current_time)
+            logger.log_detections(detections, current_time)
             
             # Progress reporting
             if step % 100 == 0:
@@ -156,7 +190,7 @@ def main():
     finally:
         print("\nSimulation completed")
         logger.flush()
-        print("Rerun data saved. To view: rerun rerun.dat")
+        print("Rerun data saved. To view: rerun --web-viewer rerun.rrd")
 
 if __name__ == "__main__":
     main()

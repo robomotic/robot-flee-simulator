@@ -11,69 +11,61 @@ from datetime import datetime
 
 class RerunLogger:
     """Logs simulation data to Rerun for visualization."""
-    
+
     def __init__(self, app_id: str = "robo_fleet_simulator"):
-        """
-        Initialize the Rerun logger.
-        
-        Args:
-            app_id: Application ID for Rerun session
-        """
         self.app_id = app_id
         self.is_initialized = False
         self.has_sent_blueprint = False
-        
-        # Color mapping for robot models
+
+        # Color mapping for robot models (RGBA)
         self.model_colors = {
-            "G1": [0, 150, 255],    # Blue
-            "Go1": [255, 150, 0]    # Orange
+            "G1":  [0,   150, 255, 255],   # Blue
+            "Go1": [255, 150,   0, 255],   # Orange
         }
-    
+
     def initialize(self, save_to_file=False):
         """Initialize Rerun logging session."""
         if not self.is_initialized:
             if save_to_file:
                 rr.init(self.app_id)
-                rr.save("rerun.dat")
+                rr.save("rerun.rrd")
             else:
                 rr.init(self.app_id, spawn=True)
-                self._send_blueprint()
+            self._send_blueprint()
             self.is_initialized = True
-    
+
     def _send_blueprint(self):
-        """Send a blueprint for proper visualization."""
         if self.has_sent_blueprint:
             return
-            
+
         blueprint = rrb.Blueprint(
             rrb.Vertical(
-                rrb.Spatial2DView(
+                rrb.MapView(
+                    origin="world",
                     name="Map & Robots",
-                    origin="/",
-                    contents=[
-                        "+ /map/**",
-                        "+ /robots/**",
-                        "+ /collisions/**"
-                    ],
-                    spatial_information=rrb.SpatialInformation(
-                        show_origin=True,
-                        show_bounds=False,
+                    zoom=15.0,
+                    background=rrb.MapProvider.OpenStreetMap,
+                    contents=["+ world/**"],
+                ),
+                rrb.Horizontal(
+                    rrb.TimeSeriesView(
+                        name="Battery Levels",
+                        origin="/robots/battery",
+                    ),
+                    rrb.TimeSeriesView(
+                        name="Humans Detected",
+                        origin="/robots/detections/humans",
+                    ),
+                    rrb.TimeSeriesView(
+                        name="Robots Detected",
+                        origin="/robots/detections/robots",
+                    ),
+                    rrb.TextLogView(
+                        name="Logs",
+                        contents=["+ /logs/**", "+ /collisions/**"],
                     ),
                 ),
-                rrb.TextLogView(
-                    name="Logs",
-                    contents=[
-                        "+ /logs/**"
-                    ]
-                ),
-                rrb.TimeSeriesView(
-                    name="Battery Levels",
-                    origin="/robots/battery"
-                ),
-                rrb.TimeSeriesView(
-                    name="Velocity",
-                    origin="/robots/velocity_color"
-                )
+                row_shares=[3, 1],
             ),
             rrb.TimePanel(
                 state=rrb.components.PanelState.Collapsed,
@@ -83,241 +75,140 @@ class RerunLogger:
         )
         rr.send_blueprint(blueprint)
         self.has_sent_blueprint = True
-    
-    def _send_blueprint(self):
-        """Send a blueprint for proper visualization."""
-        if self.has_sent_blueprint:
-            return
-            
-        blueprint = rrb.Blueprint(
-            rrb.Vertical(
-                rrb.Spatial2DView(
-                    name="Map & Robots",
-                    origin="/",
-                    contents=[
-                        "+ /map/**",
-                        "+ /robots/**",
-                        "+ /collisions/**"
-                    ],
-                    spatial_information=rrb.SpatialInformation(
-                        show_origin=True,
-                        show_bounds=False,
-                    ),
-                ),
-                rrb.TextLogView(
-                    name="Logs",
-                    contents=[
-                        "+ /logs/**"
-                    ]
-                ),
-                rrb.TimeSeriesView(
-                    name="Battery Levels",
-                    origin="/robots/battery"
-                ),
-                rrb.TimeSeriesView(
-                    name="Velocity",
-                    origin="/robots/velocity_color"
-                )
-            ),
-            rrb.TimePanel(
-                state=rrb.components.PanelState.Collapsed,
-                play_state=rrb.components.PlayState.Playing,
-                loop_mode=rrb.components.LoopMode.All,
-            ),
-        )
-        rr.send_blueprint(blueprint)
-        self.has_sent_blueprint = True
-    
+
     def log_map_data(self, walkable_ways: List[Dict[str, Any]]):
-        """
-        Log map data (walkable ways) to Rerun.
-        
-        Args:
-            walkable_ways: List of walkable ways from map data
-        """
+        """Log OSM walkable ways as geo line strings (logged once, static)."""
         if not self.is_initialized:
             self.initialize()
-        
-        # Log each way as a line strip
-        for i, way in enumerate(walkable_ways):
-            if 'nodes' in way and len(way['nodes']) >= 2:
-                # Convert to numpy array for Rerun
-                points = np.array([[node[0], node[1]] for node in way['nodes']])
-                
-                # Log as line strip
-                rr.log(
-                    f"map/way_{i}",
-                    rr.LineStrips2D(
-                        [points],  # Need to pass as list of strips
-                        colors=[100, 100, 100],  # Gray
-                        radii=2.0  # Use radii instead of widths
-                    )
-                )
-        
-        # Log map background (optional)
-        rr.log("map/background", rr.TextLog("Map data loaded from OpenStreetMap", level=rr.TextLogLevel.INFO))
-    
+
+        # Batch all ways into a single GeoLineStrings call for efficiency
+        strips = []
+        for way in walkable_ways:
+            nodes = way.get('nodes', [])
+            if len(nodes) >= 2:
+                # nodes are already (lat, lon) tuples
+                strips.append(np.array(nodes, dtype=np.float64))
+
+        if strips:
+            rr.log(
+                "world/map",
+                rr.GeoLineStrings(
+                    lat_lon=strips,
+                    colors=[120, 120, 120, 180],   # semi-transparent gray
+                    radii=rr.Radius.ui_points(1.5),
+                ),
+                static=True,
+            )
+
     def log_robots(self, robot_states: List[Dict[str, Any]], timestamp: datetime = None):
-        """
-        Log robot states to Rerun.
-        
-        Args:
-            robot_states: List of robot state dictionaries
-            timestamp: Simulation timestamp (defaults to now)
-        """
+        """Log robot positions and battery levels."""
         if not self.is_initialized:
             self.initialize()
-        
-        # Set time if provided
+
         if timestamp is not None:
-            # Convert to duration since start (we'll use the timestamp as duration for simplicity)
-            # In a real app, you'd subtract start time, but for now we'll use the timestamp directly
             rr.set_time("sim_time", duration=timestamp.timestamp())
-        
-        # Prepare data for batch logging
-        positions = []
+
+        lat_lons = []
         colors = []
-        radii = []
-        velocities = []
-        battery_levels = []
-        
+
         for state in robot_states:
-            # Position (latitude, longitude) - we'll use these directly for now
-            positions.append([state['longitude'], state['latitude']])  # Note: lon, lat order for x,y
-            
-            # Color by model
-            model = state['model']
-            color = self.model_colors.get(model, [128, 128, 128])  # Default gray
-            colors.append(color)
-            
-            # Size based on bounding box (use average of width and height)
-            bbox = state['bounding_box']
-            radius = max(bbox['width'], bbox['height']) / 2
-            radii.append(radius)
-            
-            # Velocity magnitude
-            velocities.append(state['velocity'])
-            
-            # Battery level
-            battery_levels.append(state['battery'])
-        
-        if positions:  # Only log if we have robots
-            positions_np = np.array(positions)
-            colors_np = np.array(colors, dtype=np.uint8)
-            radii_np = np.array(radii)
-            velocities_np = np.array(velocities)
-            battery_np = np.array(battery_levels)
-            
-            # Log robot positions as points
+            lat_lons.append([state['latitude'], state['longitude']])
+            colors.append(self.model_colors.get(state['model'], [128, 128, 128, 255]))
+
+        if lat_lons:
             rr.log(
-                "robots/positions",
-                rr.Points2D(
-                    positions_np,
-                    colors=colors_np,
-                    radii=radii_np
-                )
+                "world/robots",
+                rr.GeoPoints(
+                    lat_lon=np.array(lat_lons, dtype=np.float64),
+                    colors=np.array(colors, dtype=np.uint8),
+                    radii=rr.Radius.ui_points(8.0),
+                ),
             )
-            
-            # Log velocity as colored points (speed represented by color intensity)
-            if len(positions) > 0:
-                # Normalize velocities for color representation (0-1 range)
-                max_vel = max(velocities_np) if len(velocities_np) > 0 else 1.0
-                if max_vel > 0:
-                    vel_normalized = velocities_np / max_vel
-                    # Blue color intensity based on velocity (0=dark blue, 1=bright blue)
-                    vel_colors = np.zeros((len(positions_np), 3), dtype=np.uint8)
-                    vel_colors[:, 2] = (vel_normalized * 255).astype(np.uint8)  # Blue channel
-                else:
-                    vel_colors = np.zeros((len(positions_np), 3), dtype=np.uint8)
-                    vel_colors[:, 2] = 128  # Medium blue if no velocity
-                
-                # Log velocity colors
-                rr.log(
-                    "robots/velocity_color",
-                    rr.Points2D(
-                        positions_np,
-                        colors=vel_colors,
-                        radii=radii_np
-                    )
-                )
-            
-            # Log battery levels as scalar values
+
+        # Log each robot's battery on its own path so the time-series shows per-robot lines
+        for state in robot_states:
+            short_id = state['serial_number'][:8]
             rr.log(
-                "robots/battery",
-                rr.Scalars(battery_np)
+                f"robots/battery/{state['model']}_{short_id}",
+                rr.Scalars(state['battery']),
             )
-    
-    def log_collisions(self, collisions: List[Tuple[str, str]], timestamp: datetime = None):
-        """
-        Log collision events to Rerun.
-        
-        Args:
-            collisions: List of tuples (robot_id1, robot_id2) representing colliding pairs
-            timestamp: Simulation timestamp (defaults to now)
-        """
+
+    def log_pedestrians(self, pedestrian_states: List[Dict[str, Any]], timestamp: datetime = None):
+        """Log pedestrian positions as green GeoPoints."""
         if not self.is_initialized:
             self.initialize()
-        
-        # Set time if provided
+
         if timestamp is not None:
             rr.set_time("sim_time", duration=timestamp.timestamp())
-        
-        if collisions:
-            # Log each collision as a text log
-            for i, (robot_id1, robot_id2) in enumerate(collisions):
-                rr.log(
-                    f"collisions/event_{i}",
-                    rr.TextLog(
-                        f"Collision between robots {robot_id1[:8]} and {robot_id2[:8]}",
-                        level=rr.TextLogLevel.WARN
-                    )
-                )
-            
-            # Also log as a single warning with count
-            rr.log(
-                "collisions/summary",
-                rr.TextLog(
-                    f"Detected {len(collisions)} collision(s)",
-                    level=rr.TextLogLevel.WARN
-                )
-            )
-    
-    def flush(self):
-        """Flush and save Rerun data."""
-        if self.is_initialized:
-            # Data is already being saved to file by the initial rr.save call
-            pass
 
-def test_logger():
-    """Test function for the logger."""
-    logger = RerunLogger("test_logger")
-    logger.initialize()
-    
-    # Test logging some dummy data
-    dummy_states = [
-        {
-            'id': 'test1',
-            'vendor': 'Unitree',
-            'model': 'G1',
-            'serial_number': 'SN001',
-            'latitude': 51.50,
-            'longitude': -0.10,
-            'velocity': 1.5,
-            'heading': 0.0,
-            'battery': 85.0,
-            'bounding_box': {
-                'x': 0.0,
-                'y': 0.0,
-                'width': 0.3,
-                'height': 0.5
-            }
+        if not pedestrian_states:
+            return
+
+        lat_lons = np.array(
+            [[s['latitude'], s['longitude']] for s in pedestrian_states],
+            dtype=np.float64,
+        )
+        rr.log(
+            "world/pedestrians",
+            rr.GeoPoints(
+                lat_lon=lat_lons,
+                colors=np.array([[60, 200, 80, 220]] * len(pedestrian_states), dtype=np.uint8),
+                radii=rr.Radius.ui_points(5.0),
+            ),
+        )
+
+    def log_detections(self, detections: List[Dict[str, Any]], timestamp: datetime = None):
+        """Log per-robot cone detection counts (humans and robots seen)."""
+        if not self.is_initialized:
+            self.initialize()
+        if timestamp is not None:
+            rr.set_time("sim_time", duration=timestamp.timestamp())
+
+        for d in detections:
+            short_id = d['serial_number'][:8]
+            label = f"{d['model']}_{short_id}"
+            rr.log(f"robots/detections/humans/{label}", rr.Scalars(float(d['total_humans'])))
+            rr.log(f"robots/detections/robots/{label}", rr.Scalars(float(d['total_robots'])))
+
+    def log_robot_cones(self, cones: List[Dict[str, Any]], timestamp: datetime = None):
+        """Draw each robot's sensor cone outline on the map."""
+        if not self.is_initialized:
+            self.initialize()
+        if timestamp is not None:
+            rr.set_time("sim_time", duration=timestamp.timestamp())
+
+        # Model colours with low alpha so cones are visible but not distracting
+        cone_colors = {
+            "G1":  [0,   180, 255,  50],
+            "Go1": [255, 140,   0,  50],
         }
-    ]
-    
-    logger.log_map_data([])  # Empty ways for test
-    logger.log_robots(dummy_states)
-    logger.flush()
-    print("Logger test completed")
+        for cone in cones:
+            color = cone_colors.get(cone['model'], [200, 200, 200, 50])
+            rr.log(
+                f"world/cones/{cone['serial_number'][:8]}",
+                rr.GeoLineStrings(
+                    lat_lon=[np.array(cone['lat_lons'], dtype=np.float64)],
+                    colors=[color],
+                    radii=rr.Radius.ui_points(1.0),
+                ),
+            )
 
-if __name__ == "__main__":
-    test_logger()
+    def log_collisions(self, collisions: List[Tuple[str, str]], timestamp: datetime = None):
+        """Log collision events."""
+        if not self.is_initialized:
+            self.initialize()
+
+        if timestamp is not None:
+            rr.set_time("sim_time", duration=timestamp.timestamp())
+
+        for robot_id1, robot_id2 in collisions:
+            rr.log(
+                "collisions/events",
+                rr.TextLog(
+                    f"Collision: {robot_id1[:8]} ↔ {robot_id2[:8]}",
+                    level=rr.TextLogLevel.WARN,
+                ),
+            )
+
+    def flush(self):
+        pass

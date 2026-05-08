@@ -5,10 +5,26 @@ Handles robot creation, state updates, and patrolling behavior.
 
 import uuid
 import random
-from typing import List, Dict, Any, Tuple, Optional
+from typing import ClassVar, List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field
 from utils import GeoPoint, GeoConverter, BoundingBox
 import math
+
+# Sensor specs sourced from Unitree datasheets:
+#   G1  – Depth Camera + 3D LiDAR  → forward 120° sector, 15 m
+#   Go1 – Fisheye binocular depth (150×170° per unit) → 150° sector, 10 m
+SENSOR_SPECS: Dict[str, Dict[str, float]] = {
+    "G1":  {"fov_degrees": 120.0, "range_m": 15.0},
+    "Go1": {"fov_degrees": 150.0, "range_m": 10.0},
+}
+
+
+def _angle_diff(a: float, b: float) -> float:
+    """Signed shortest-path difference a − b mapped to (−π, π]."""
+    d = (a - b) % (2 * math.pi)
+    if d > math.pi:
+        d -= 2 * math.pi
+    return d
 
 @dataclass
 class BoundingBox2D:
@@ -46,19 +62,30 @@ class Robot:
     vendor: str = "Unitree"
     model: str = field(default_factory=lambda: random.choice(["G1", "Go1"]))
     serial_number: str = field(default_factory=lambda: str(uuid.uuid4()))
-    
+
     # Mutable state
     state: RobotState = field(init=False)
-    
+
     # Physical properties
     length: float = 0.5  # meters
     width: float = 0.3   # meters
     height: float = 0.4  # meters
-    
+
+    # Battery drain rate: % per second at 1 m/s (quadratic in velocity).
+    # G1  (~720 Wh battery): 4.0 h at 1 m/s → 100 / (4 * 3600) ≈ 0.00694 %/s
+    # Go1 (~154 Wh battery): 3.5 h at 1 m/s → 100 / (3.5 * 3600) ≈ 0.00794 %/s
+    BATTERY_DRAIN_RATES: ClassVar[Dict[str, float]] = {
+        "G1":  100.0 / (4.0 * 3600),
+        "Go1": 100.0 / (3.5 * 3600),
+    }
+    battery_drain_rate: float = field(init=False)
+
     def __post_init__(self):
-        """Initialize robot state after creation."""
-        # State will be initialized by RobotManager
-        pass
+        # battery_drain_rate is set by RobotManager after model is assigned
+        self.battery_drain_rate = 100.0 / (4.0 * 3600)
+
+    def update_drain_rate(self):
+        self.battery_drain_rate = self.BATTERY_DRAIN_RATES.get(self.model, 100.0 / (4.0 * 3600))
 
 class RobotManager:
     """Manages a fleet of robots, their initialization, and updates."""
@@ -130,16 +157,16 @@ class RobotManager:
     
     def _create_robots(self, g1_count: int, go1_count: int):
         """Create robot instances."""
-        # Create G1 robots
         for _ in range(g1_count):
             robot = Robot()
             robot.model = "G1"
+            robot.update_drain_rate()
             self.robots.append(robot)
-        
-        # Create Go1 robots
+
         for _ in range(go1_count):
             robot = Robot()
             robot.model = "Go1"
+            robot.update_drain_rate()
             self.robots.append(robot)
     
     def _initialize_robot_states(self):
@@ -232,33 +259,130 @@ class RobotManager:
         # If we reach here, return the last point
         return local_coords[-1]
     
-    def update_positions(self, time_step: float):
+    def get_local_positions(self) -> List[Tuple[float, float]]:
+        """Return local (x, y) coords of all active robots."""
+        return [
+            (r.state.bounding_box.x, r.state.bounding_box.y)
+            for r in self.robots if r.state.battery > 0
+        ]
+
+    def detect_in_cone(
+        self,
+        pedestrian_local_positions: List[Tuple[float, float]],
+    ) -> List[Dict[str, Any]]:
         """
-        Update robot positions based on velocity and time step.
-        
-        Args:
-            time_step: Time step in seconds
+        For each active robot, count how many pedestrians and other robots
+        fall inside its forward sensor cone.  Positions are never stored.
+
+        Returns a list of dicts: {id, model, serial_number,
+                                   total_humans, total_robots}
         """
+        active = [(r, r.state.bounding_box.x, r.state.bounding_box.y)
+                  for r in self.robots if r.state.battery > 0]
+
+        results = []
+        for robot, rx, ry in active:
+            specs = SENSOR_SPECS.get(robot.model, SENSOR_SPECS["G1"])
+            half_fov = math.radians(specs["fov_degrees"] / 2)
+            max_range = specs["range_m"]
+            heading = robot.state.heading
+
+            def _in_cone(ox: float, oy: float) -> bool:
+                dist = math.hypot(ox - rx, oy - ry)
+                if dist < 0.01 or dist > max_range:
+                    return False
+                return abs(_angle_diff(math.atan2(oy - ry, ox - rx), heading)) <= half_fov
+
+            total_humans = sum(1 for px, py in pedestrian_local_positions if _in_cone(px, py))
+            total_robots = sum(1 for other, ox, oy in active
+                               if other.state.id != robot.state.id and _in_cone(ox, oy))
+
+            results.append({
+                "id": robot.state.id,
+                "model": robot.state.model,
+                "serial_number": robot.state.serial_number,
+                "total_humans": total_humans,
+                "total_robots": total_robots,
+            })
+        return results
+
+    def get_detection_cones(self) -> List[Dict[str, Any]]:
+        """
+        Return the outline of each robot's sensor cone as a list of
+        (lat, lon) points for map visualisation (apex → arc → apex).
+        """
+        arc_steps = 14
+        cones = []
+        for robot in self.robots:
+            if robot.state.battery <= 0:
+                continue
+            specs = SENSOR_SPECS.get(robot.model, SENSOR_SPECS["G1"])
+            half_fov = math.radians(specs["fov_degrees"] / 2)
+            max_range = specs["range_m"]
+            rx, ry = robot.state.bounding_box.x, robot.state.bounding_box.y
+            heading = robot.state.heading
+
+            pts = [(rx, ry)]
+            for i in range(arc_steps + 1):
+                angle = heading - half_fov + i * (2 * half_fov / arc_steps)
+                pts.append((rx + math.cos(angle) * max_range,
+                             ry + math.sin(angle) * max_range))
+            pts.append((rx, ry))  # close
+
+            lat_lons = [self.geo_converter.local_to_geo(x, y) for x, y in pts]
+            cones.append({
+                "robot_id": robot.state.id,
+                "model": robot.state.model,
+                "serial_number": robot.state.serial_number,
+                "lat_lons": [(g.lat, g.lon) for g in lat_lons],
+            })
+        return cones
+
+    def update_positions(
+        self,
+        time_step: float,
+        pedestrian_local_positions: List[Tuple[float, float]] = None,
+    ):
+        """
+        Update robot positions. If pedestrian_local_positions is provided,
+        robots slow down when pedestrians are within AVOIDANCE_RADIUS metres.
+        """
+        nearby_threshold_stop = 2.0   # m — stop completely
+        nearby_threshold_slow = 5.0   # m — halve speed
+
         for robot in self.robots:
             state = robot.state
-            
+
             # Skip if battery is depleted
             if state.battery <= 0:
                 state.velocity = 0.0
                 continue
-            
-            # Drain battery based on velocity and time
-            # Simple model: drain proportional to velocity^2
-            battery_drain = (state.velocity ** 2) * 0.01 * time_step  # Adjust factor as needed
+
+            # --- pedestrian avoidance: speed reduction ---
+            effective_velocity = state.velocity
+            if pedestrian_local_positions:
+                rx, ry = state.bounding_box.x, state.bounding_box.y
+                min_dist = min(
+                    (math.hypot(rx - px, ry - py) for px, py in pedestrian_local_positions),
+                    default=float('inf'),
+                )
+                if min_dist < nearby_threshold_stop:
+                    effective_velocity = 0.0
+                elif min_dist < nearby_threshold_slow:
+                    effective_velocity *= 0.4
+
+            # Quadratic drain: faster walking costs disproportionately more power.
+            # Rate is calibrated so 1 m/s continuous walking matches real endurance specs.
+            battery_drain = (effective_velocity ** 2) * robot.battery_drain_rate * time_step
             state.battery = max(0.0, state.battery - battery_drain)
             
             # If battery is depleted, stop
             if state.battery <= 0:
                 state.velocity = 0.0
                 continue
-            
-            # Calculate distance to move
-            distance = state.velocity * time_step
+
+            # Calculate distance to move (uses effective_velocity so avoidance takes effect)
+            distance = effective_velocity * time_step
             
             # Get current way
             current_way = None
