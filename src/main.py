@@ -16,6 +16,7 @@ from map import MapDataFetcher
 from robot import RobotManager
 from pedestrian import PedestrianManager
 from logger import RerunLogger
+from exporter import ParquetExporter
 from utils import BoundingBox, GeoPoint
 
 import rerun as rr
@@ -131,8 +132,11 @@ def main():
     
     logger.log_map_data(walkable_ways)
     logger.log_robots(robot_manager.get_robots_state())
-    
-    # 4. Simulation loop
+
+    # 4. Parquet exporter (accumulates data, writes at end)
+    exporter = ParquetExporter()
+
+    # 5. Simulation loop
     print("\nStarting simulation...")
     current_time = start_time
     simulation_seconds = 0
@@ -165,11 +169,22 @@ def main():
                 pedestrian_local_positions=pedestrian_manager.get_local_positions(),
             )
 
-            # Log states
-            logger.log_robots(robot_manager.get_robots_state(), current_time)
-            logger.log_pedestrians(pedestrian_manager.get_state(), current_time)
+            # Collect state once; reuse for both logging and export
+            robot_states = robot_manager.get_robots_state()
+            ped_states   = pedestrian_manager.get_state()
+
+            logger.log_robots(robot_states, current_time)
+            logger.log_pedestrians(ped_states, current_time)
             logger.log_robot_cones(robot_manager.get_detection_cones(), current_time)
             logger.log_detections(detections, current_time)
+
+            exporter.record_step(
+                timestamp_s=simulation_seconds,
+                robot_states=robot_states,
+                detections=detections,
+                collisions=collisions,
+                ped_states=ped_states,
+            )
             
             # Progress reporting
             if step % 100 == 0:
@@ -191,6 +206,7 @@ def main():
         print("\nSimulation completed")
         logger.flush()
         print("Rerun data saved. To view: rerun --web-viewer rerun.rrd")
+        exporter.write()
 
 if __name__ == "__main__":
     main()
