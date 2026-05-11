@@ -99,3 +99,5 @@ Thumbs.db
 *.tmp
 *.temp
 *~
+# Claude Code instructions (local only)
+CLAUDE.md
